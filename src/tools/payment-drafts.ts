@@ -1,7 +1,16 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { RevolutClient } from "../client.js";
-import { jsonResponse, errorResponse, logToolCall } from "../utils.js";
+import {
+  jsonResponse,
+  errorResponse,
+  logToolCall,
+  definedOnly,
+  uuid,
+  moneyAmount,
+  currencyCode,
+  isoDateTime,
+} from "../utils.js";
 
 export function registerPaymentDraftTools(
   server: McpServer,
@@ -17,8 +26,7 @@ export function registerPaymentDraftTools(
     async () => {
       logToolCall("revolut_list_payment_drafts");
       try {
-        const result = await client.get("/api/1.0/payment-drafts");
-        return jsonResponse(result);
+        return jsonResponse(await client.get("/api/1.0/payment-drafts"));
       } catch (error) {
         return errorResponse(error);
       }
@@ -32,61 +40,40 @@ export function registerPaymentDraftTools(
       description:
         "Create a payment draft for future processing or approval. Can include multiple payments and an optional schedule date.",
       inputSchema: {
-        title: z.string().describe("Title for the payment draft"),
-        schedule_for: z
-          .string()
+        title: z.string().max(200).describe("Title for the payment draft"),
+        schedule_for: isoDateTime
           .optional()
           .describe("Schedule date (ISO 8601 date, e.g., 2024-12-31)"),
         payments: z
           .array(
             z.object({
-              account_id: z.string().describe("Source account ID (UUID)"),
-              counterparty_id: z
-                .string()
-                .describe("Receiver counterparty ID (UUID)"),
-              receiver_account_id: z
-                .string()
+              account_id: uuid.describe("Source account ID (UUID)"),
+              counterparty_id: uuid.describe("Receiver counterparty ID (UUID)"),
+              receiver_account_id: uuid
                 .optional()
                 .describe("Receiver's account ID within counterparty"),
-              amount: z.number().positive().describe("Payment amount"),
-              currency: z.string().describe("Currency code"),
-              reference: z.string().describe("Payment reference"),
+              amount: moneyAmount.describe("Payment amount"),
+              currency: currencyCode.describe("Currency code"),
+              reference: z.string().max(500).describe("Payment reference"),
             })
           )
           .min(1)
+          .max(100)
           .describe("Array of payments to include in the draft"),
       },
     },
     async ({ title, schedule_for, payments }) => {
-      logToolCall("revolut_create_payment_draft", {
-        title,
-        payment_count: payments.length,
-      });
+      logToolCall("revolut_create_payment_draft", { title, schedule_for, payments });
       try {
-        const formattedPayments = payments.map((p) => ({
-          account_id: p.account_id,
-          receiver: {
-            counterparty_id: p.counterparty_id,
-            ...(p.receiver_account_id && {
-              account_id: p.receiver_account_id,
-            }),
-          },
-          amount: p.amount,
-          currency: p.currency,
-          reference: p.reference,
-        }));
-
-        const body: Record<string, unknown> = {
+        const body = definedOnly({
           title,
-          payments: formattedPayments,
-        };
-        if (schedule_for) body.schedule_for = schedule_for;
-
-        const result = await client.postJson(
-          "/api/1.0/payment-drafts",
-          body
-        );
-        return jsonResponse(result);
+          schedule_for,
+          payments: payments.map(({ counterparty_id, receiver_account_id, ...p }) => ({
+            ...p,
+            receiver: definedOnly({ counterparty_id, account_id: receiver_account_id }),
+          })),
+        });
+        return jsonResponse(await client.postJson("/api/1.0/payment-drafts", body));
       } catch (error) {
         return errorResponse(error);
       }
@@ -99,19 +86,14 @@ export function registerPaymentDraftTools(
       title: "Get Payment Draft",
       description:
         "Retrieve details of a specific payment draft, including all its individual payments and their statuses.",
-      inputSchema: {
-        payment_draft_id: z
-          .string()
-          .describe("The payment draft ID (UUID)"),
-      },
+      inputSchema: { payment_draft_id: uuid.describe("The payment draft ID (UUID)") },
     },
     async ({ payment_draft_id }) => {
       logToolCall("revolut_get_payment_draft", { payment_draft_id });
       try {
-        const result = await client.get(
-          `/api/1.0/payment-drafts/${payment_draft_id}`
+        return jsonResponse(
+          await client.get(`/api/1.0/payment-drafts/${payment_draft_id}`)
         );
-        return jsonResponse(result);
       } catch (error) {
         return errorResponse(error);
       }
@@ -123,22 +105,13 @@ export function registerPaymentDraftTools(
     {
       title: "Delete Payment Draft",
       description: "Delete an existing payment draft.",
-      inputSchema: {
-        payment_draft_id: z
-          .string()
-          .describe("The payment draft ID (UUID)"),
-      },
+      inputSchema: { payment_draft_id: uuid.describe("The payment draft ID (UUID)") },
     },
     async ({ payment_draft_id }) => {
       logToolCall("revolut_delete_payment_draft", { payment_draft_id });
       try {
-        await client.deleteReq(
-          `/api/1.0/payment-drafts/${payment_draft_id}`
-        );
-        return jsonResponse({
-          success: true,
-          message: "Payment draft deleted",
-        });
+        await client.deleteReq(`/api/1.0/payment-drafts/${payment_draft_id}`);
+        return jsonResponse({ success: true, message: "Payment draft deleted" });
       } catch (error) {
         return errorResponse(error);
       }

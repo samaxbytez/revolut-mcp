@@ -25,8 +25,7 @@ function mockError(status: number, body: unknown): Response {
   return {
     ok: false,
     status,
-    text: async () =>
-      typeof body === "string" ? body : JSON.stringify(body),
+    text: async () => (typeof body === "string" ? body : JSON.stringify(body)),
   } as Response;
 }
 
@@ -64,10 +63,7 @@ describe("RevolutClient - GET", () => {
 
   it("uses custom base URL", async () => {
     mockFetch.mockResolvedValueOnce(mockOk({ data: "ok" }));
-    const client = new RevolutClient(
-      "token",
-      "https://b2b.revolut.com"
-    );
+    const client = new RevolutClient("token", "https://b2b.revolut.com");
     await client.get("/api/1.0/accounts");
 
     const url = mockFetch.mock.calls[0][0] as string;
@@ -161,5 +157,92 @@ describe("RevolutClient - error handling", () => {
       expect(err.errorCode).toBe("unknown");
       expect(err.message).not.toContain("not json");
     }
+  });
+});
+
+describe("RevolutClient - request safety", () => {
+  const attacks = [
+    "/api/1.0/../../x",
+    "/api/1.0/%2e%2e/x",
+    "/api/1.0/%2E%2E/x",
+    "/api/1.0/accounts/..",
+    "/api/1.0/./x",
+    "https://evil.example/api/1.0/x",
+    "//evil.example/api/1.0/x",
+    "/api/1.0/accounts/..\\x",
+  ];
+
+  it.each(attacks)("rejects %s without sending a request", async (path) => {
+    const client = new RevolutClient("secret-token");
+    await expect(client.get(path)).rejects.toThrow();
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it("rejects paths outside /api/", async () => {
+    const client = new RevolutClient("secret-token");
+    await expect(client.get("/other/x")).rejects.toThrow(/outside the Revolut API/);
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it("keeps ? and # in a path segment inside the path", async () => {
+    mockFetch.mockResolvedValueOnce(mockOk({}));
+    await new RevolutClient("t").get("/api/1.0/a%3Fb");
+    expect(new URL(mockFetch.mock.calls[0][0]).pathname).toBe("/api/1.0/a%3Fb");
+  });
+
+  it("sends a timeout signal and refuses redirects", async () => {
+    mockFetch.mockResolvedValueOnce(mockOk({}));
+    await new RevolutClient("t").get("/api/1.0/x");
+    const opts = mockFetch.mock.calls[0][1];
+    expect(opts.redirect).toBe("error");
+    expect(opts.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("requires https except for loopback", () => {
+    expect(() => new RevolutClient("t", "http://api.example.com")).toThrow(/https/);
+    expect(() => new RevolutClient("t", "http://127.0.0.1:8080")).not.toThrow();
+    expect(() => new RevolutClient("t", "not a url")).toThrow();
+  });
+
+  it("ignores any path on the base URL and flags production", () => {
+    expect(new RevolutClient("t", "https://b2b.revolut.com/api/1.0").isProduction).toBe(
+      true
+    );
+    expect(new RevolutClient("t").isProduction).toBe(false);
+  });
+
+  it("reports 429 with Retry-After", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 429,
+      headers: new Headers({ "retry-after": "12" }),
+      text: async () => "<html>slow down</html>",
+    } as Response);
+    const err = await new RevolutClient("t").get("/api/1.0/x").catch((e) => e);
+    expect(err).toBeInstanceOf(RevolutApiError);
+    expect(err.message).toContain("retry after 12 seconds");
+    expect(err.message).not.toContain("html");
+  });
+
+  it("does not echo a non-JSON error body or success body", async () => {
+    mockFetch.mockResolvedValueOnce(mockError(502, "<html>secret-token leaked</html>"));
+    const err = await new RevolutClient("t").get("/api/1.0/x").catch((e) => e);
+    expect(err.message).not.toContain("secret-token");
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      text: async () => "<html>oops</html>",
+    } as Response);
+    const err2 = await new RevolutClient("t").get("/api/1.0/x").catch((e) => e);
+    expect(err2.message).not.toContain("oops");
+  });
+
+  it("keeps Revolut's validation message", async () => {
+    mockFetch.mockResolvedValueOnce(
+      mockError(400, { code: 3000, message: "Invalid amount" })
+    );
+    const err = await new RevolutClient("t").get("/api/1.0/x").catch((e) => e);
+    expect(err.message).toContain("Invalid amount");
   });
 });

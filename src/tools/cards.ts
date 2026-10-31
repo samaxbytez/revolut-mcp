@@ -3,43 +3,85 @@ import { z } from "zod";
 import { RevolutClient } from "../client.js";
 import {
   jsonResponse,
+  listResponse,
   errorResponse,
   logToolCall,
   buildParams,
+  definedOnly,
+  cursorParams,
+  limitParam,
+  requestId,
+  uuid,
 } from "../utils.js";
 
-export function registerCardTools(
+const limit = z.number().nonnegative().finite().optional();
+
+export const spendingLimits = z
+  .object({
+    single: limit.describe("Single transaction limit"),
+    day: limit.describe("Daily spending limit"),
+    week: limit.describe("Weekly spending limit"),
+    month: limit.describe("Monthly spending limit"),
+    quarter: limit.describe("Quarterly spending limit"),
+    year: limit.describe("Yearly spending limit"),
+    all_time: limit.describe("All-time spending limit"),
+  })
+  .describe("Spending limits in minor currency units");
+
+export const cardLabel = z.string().max(30).describe("Card label (max 30 chars)");
+export const merchantCategories = z
+  .array(z.string().max(20))
+  .max(500)
+  .describe("Allowed merchant category codes");
+
+// Fields shared by every "set card settings" tool.
+const cardSettings = {
+  label: cardLabel.optional(),
+  spending_limits: spendingLimits.optional(),
+  categories: merchantCategories.optional(),
+};
+
+/** A tool that acts on one card: `POST|DELETE /cards/{id}[/action]`. */
+function cardAction(
   server: McpServer,
-  client: RevolutClient
-): void {
+  name: string,
+  title: string,
+  description: string,
+  call: (id: string) => Promise<unknown>,
+  message?: string
+) {
+  server.registerTool(
+    name,
+    { title, description, inputSchema: { card_id: uuid.describe("The card ID (UUID)") } },
+    async ({ card_id }) => {
+      logToolCall(name, { card_id });
+      try {
+        const result = await call(card_id);
+        return jsonResponse(message ? { success: true, message } : result);
+      } catch (error) {
+        return errorResponse(error);
+      }
+    }
+  );
+}
+
+export function registerCardTools(server: McpServer, client: RevolutClient): void {
   server.registerTool(
     "revolut_list_cards",
     {
       title: "List Cards",
       description:
-        "Retrieve a list of cards issued for the business. Production only. Supports cursor-based pagination.",
-      inputSchema: {
-        created_before: z
-          .string()
-          .optional()
-          .describe("Pagination cursor: ISO 8601 datetime"),
-        limit: z
-          .number()
-          .int()
-          .min(1)
-          .max(100)
-          .optional()
-          .describe("Max results (1-100, default 100)"),
-      },
+        "Retrieve a list of cards issued for the business. Production only. Supports cursor-based pagination; a note is added when a full page came back.",
+      inputSchema: { ...cursorParams, limit: limitParam(100) },
     },
     async (params) => {
       logToolCall("revolut_list_cards", params);
       try {
-        const result = await client.get(
-          "/api/1.0/cards",
-          buildParams(params)
-        );
-        return jsonResponse(result);
+        const result = await client.get("/api/1.0/cards", buildParams(params));
+        return listResponse(result, {
+          limit: params.limit,
+          cursorParam: "created_before",
+        });
       } catch (error) {
         return errorResponse(error);
       }
@@ -53,54 +95,18 @@ export function registerCardTools(
       description:
         "Create a new virtual card. Production only. Requires a unique request_id.",
       inputSchema: {
-        request_id: z
-          .string()
-          .max(40)
-          .describe("Unique idempotency key (max 40 chars)"),
-        holder_id: z
-          .string()
-          .optional()
-          .describe("Team member ID to assign as cardholder"),
-        label: z
-          .string()
-          .max(30)
-          .optional()
-          .describe("Card label (max 30 chars)"),
-        spending_limits: z
-          .object({
-            single: z.number().optional().describe("Single transaction limit"),
-            day: z.number().optional().describe("Daily spending limit"),
-            week: z.number().optional().describe("Weekly spending limit"),
-            month: z.number().optional().describe("Monthly spending limit"),
-            quarter: z
-              .number()
-              .optional()
-              .describe("Quarterly spending limit"),
-            year: z.number().optional().describe("Yearly spending limit"),
-            all_time: z.number().optional().describe("All-time spending limit"),
-          })
-          .optional()
-          .describe("Spending limits in minor currency units"),
-        categories: z
-          .array(z.string())
-          .optional()
-          .describe("Allowed merchant category codes"),
+        request_id: requestId.describe("Unique idempotency key (max 40 chars)"),
+        holder_id: uuid.optional().describe("Team member ID to assign as cardholder"),
+        ...cardSettings,
       },
     },
     async (params) => {
-      logToolCall("revolut_create_card", { request_id: params.request_id });
+      logToolCall("revolut_create_card", params);
       try {
-        const body: Record<string, unknown> = {
-          request_id: params.request_id,
-          virtual: true,
-        };
-        if (params.holder_id) body.holder_id = params.holder_id;
-        if (params.label) body.label = params.label;
-        if (params.spending_limits)
-          body.spending_limits = params.spending_limits;
-        if (params.categories) body.categories = params.categories;
-
-        const result = await client.postJson("/api/1.0/cards", body);
+        const result = await client.postJson(
+          "/api/1.0/cards",
+          definedOnly({ ...params, virtual: true })
+        );
         return jsonResponse(result);
       } catch (error) {
         return errorResponse(error);
@@ -112,17 +118,13 @@ export function registerCardTools(
     "revolut_get_card",
     {
       title: "Get Card Details",
-      description:
-        "Retrieve details of a specific card by ID. Production only.",
-      inputSchema: {
-        card_id: z.string().describe("The card ID (UUID)"),
-      },
+      description: "Retrieve details of a specific card by ID. Production only.",
+      inputSchema: { card_id: uuid.describe("The card ID (UUID)") },
     },
     async ({ card_id }) => {
       logToolCall("revolut_get_card", { card_id });
       try {
-        const result = await client.get(`/api/1.0/cards/${card_id}`);
-        return jsonResponse(result);
+        return jsonResponse(await client.get(`/api/1.0/cards/${card_id}`));
       } catch (error) {
         return errorResponse(error);
       }
@@ -135,171 +137,66 @@ export function registerCardTools(
       title: "Update Card Settings",
       description:
         "Update card settings such as label, spending limits, and merchant controls. Production only.",
-      inputSchema: {
-        card_id: z.string().describe("The card ID (UUID)"),
-        label: z
-          .string()
-          .max(30)
-          .optional()
-          .describe("New card label (max 30 chars)"),
-        spending_limits: z
-          .object({
-            single: z.number().optional(),
-            day: z.number().optional(),
-            week: z.number().optional(),
-            month: z.number().optional(),
-            quarter: z.number().optional(),
-            year: z.number().optional(),
-            all_time: z.number().optional(),
-          })
-          .optional()
-          .describe("Updated spending limits"),
-        categories: z
-          .array(z.string())
-          .optional()
-          .describe("Updated allowed merchant category codes"),
-      },
+      inputSchema: { card_id: uuid.describe("The card ID (UUID)"), ...cardSettings },
     },
     async ({ card_id, ...rest }) => {
-      logToolCall("revolut_update_card", { card_id });
+      logToolCall("revolut_update_card", { card_id, ...rest });
       try {
-        const body: Record<string, unknown> = {};
-        for (const [k, v] of Object.entries(rest)) {
-          if (v !== undefined) body[k] = v;
-        }
-        const result = await client.patchJson(
-          `/api/1.0/cards/${card_id}`,
-          body
+        return jsonResponse(
+          await client.patchJson(`/api/1.0/cards/${card_id}`, definedOnly(rest))
         );
-        return jsonResponse(result);
       } catch (error) {
         return errorResponse(error);
       }
     }
   );
 
-  server.registerTool(
+  cardAction(
+    server,
     "revolut_delete_card",
-    {
-      title: "Terminate Card",
-      description:
-        "Permanently terminate a card. This action cannot be undone. Production only.",
-      inputSchema: {
-        card_id: z.string().describe("The card ID (UUID)"),
-      },
-    },
-    async ({ card_id }) => {
-      logToolCall("revolut_delete_card", { card_id });
-      try {
-        await client.deleteReq(`/api/1.0/cards/${card_id}`);
-        return jsonResponse({ success: true, message: "Card terminated" });
-      } catch (error) {
-        return errorResponse(error);
-      }
-    }
+    "Terminate Card",
+    "Permanently terminate a card. This action cannot be undone. Production only.",
+    (id) => client.deleteReq(`/api/1.0/cards/${id}`),
+    "Card terminated"
   );
-
-  server.registerTool(
+  cardAction(
+    server,
     "revolut_freeze_card",
-    {
-      title: "Freeze Card",
-      description: "Temporarily freeze a card. Production only.",
-      inputSchema: {
-        card_id: z.string().describe("The card ID (UUID)"),
-      },
-    },
-    async ({ card_id }) => {
-      logToolCall("revolut_freeze_card", { card_id });
-      try {
-        await client.postJson(`/api/1.0/cards/${card_id}/freeze`);
-        return jsonResponse({ success: true, message: "Card frozen" });
-      } catch (error) {
-        return errorResponse(error);
-      }
-    }
+    "Freeze Card",
+    "Temporarily freeze a card. Production only.",
+    (id) => client.postJson(`/api/1.0/cards/${id}/freeze`),
+    "Card frozen"
   );
-
-  server.registerTool(
+  cardAction(
+    server,
     "revolut_unfreeze_card",
-    {
-      title: "Unfreeze Card",
-      description: "Unfreeze a previously frozen card. Production only.",
-      inputSchema: {
-        card_id: z.string().describe("The card ID (UUID)"),
-      },
-    },
-    async ({ card_id }) => {
-      logToolCall("revolut_unfreeze_card", { card_id });
-      try {
-        await client.postJson(`/api/1.0/cards/${card_id}/unfreeze`);
-        return jsonResponse({ success: true, message: "Card unfrozen" });
-      } catch (error) {
-        return errorResponse(error);
-      }
-    }
+    "Unfreeze Card",
+    "Unfreeze a previously frozen card. Production only.",
+    (id) => client.postJson(`/api/1.0/cards/${id}/unfreeze`),
+    "Card unfrozen"
   );
-
-  server.registerTool(
+  cardAction(
+    server,
     "revolut_lock_card",
-    {
-      title: "Lock Card",
-      description: "Lock a card. Production only.",
-      inputSchema: {
-        card_id: z.string().describe("The card ID (UUID)"),
-      },
-    },
-    async ({ card_id }) => {
-      logToolCall("revolut_lock_card", { card_id });
-      try {
-        await client.postJson(`/api/1.0/cards/${card_id}/lock`);
-        return jsonResponse({ success: true, message: "Card locked" });
-      } catch (error) {
-        return errorResponse(error);
-      }
-    }
+    "Lock Card",
+    "Lock a card. Production only.",
+    (id) => client.postJson(`/api/1.0/cards/${id}/lock`),
+    "Card locked"
   );
-
-  server.registerTool(
+  cardAction(
+    server,
     "revolut_unlock_card",
-    {
-      title: "Unlock Card",
-      description: "Unlock a previously locked card. Production only.",
-      inputSchema: {
-        card_id: z.string().describe("The card ID (UUID)"),
-      },
-    },
-    async ({ card_id }) => {
-      logToolCall("revolut_unlock_card", { card_id });
-      try {
-        await client.postJson(`/api/1.0/cards/${card_id}/unlock`);
-        return jsonResponse({ success: true, message: "Card unlocked" });
-      } catch (error) {
-        return errorResponse(error);
-      }
-    }
+    "Unlock Card",
+    "Unlock a previously locked card. Production only.",
+    (id) => client.postJson(`/api/1.0/cards/${id}/unlock`),
+    "Card unlocked"
   );
-
-  server.registerTool(
+  cardAction(
+    server,
     "revolut_get_sensitive_card_details",
-    {
-      title: "Get Sensitive Card Details",
-      description:
-        "Retrieve sensitive card details including PAN, CVV, and expiry date. Production only. Requires READ_SENSITIVE_CARD_DATA scope and IP whitelisting.",
-      inputSchema: {
-        card_id: z.string().describe("The card ID (UUID)"),
-      },
-    },
-    async ({ card_id }) => {
-      logToolCall("revolut_get_sensitive_card_details", { card_id });
-      try {
-        const result = await client.get(
-          `/api/1.0/cards/${card_id}/sensitive-details`
-        );
-        return jsonResponse(result);
-      } catch (error) {
-        return errorResponse(error);
-      }
-    }
+    "Get Sensitive Card Details",
+    "Retrieve sensitive card details including PAN, CVV, and expiry date. Production only. Requires READ_SENSITIVE_CARD_DATA scope and IP whitelisting.",
+    (id) => client.get(`/api/1.0/cards/${id}/sensitive-details`)
   );
 
   server.registerTool(
@@ -309,22 +206,16 @@ export function registerCardTools(
       description:
         "Replace the list of contact IDs associated with a card (1-5 contacts). Production only.",
       inputSchema: {
-        card_id: z.string().describe("The card ID (UUID)"),
-        contact_ids: z
-          .array(z.string())
-          .min(1)
-          .max(5)
-          .describe("Array of 1-5 contact UUIDs"),
+        card_id: uuid.describe("The card ID (UUID)"),
+        contact_ids: z.array(uuid).min(1).max(5).describe("Array of 1-5 contact UUIDs"),
       },
     },
     async ({ card_id, contact_ids }) => {
-      logToolCall("revolut_update_card_contacts", { card_id });
+      logToolCall("revolut_update_card_contacts", { card_id, contact_ids });
       try {
-        const result = await client.putJson(
-          `/api/1.0/cards/${card_id}/contacts`,
-          contact_ids
+        return jsonResponse(
+          await client.putJson(`/api/1.0/cards/${card_id}/contacts`, contact_ids)
         );
-        return jsonResponse(result);
       } catch (error) {
         return errorResponse(error);
       }
@@ -338,12 +229,12 @@ export function registerCardTools(
       description:
         "Replace the list of custom references on a card (1-5 name/value pairs). Production only.",
       inputSchema: {
-        card_id: z.string().describe("The card ID (UUID)"),
+        card_id: uuid.describe("The card ID (UUID)"),
         references: z
           .array(
             z.object({
-              name: z.string().describe("Reference name"),
-              value: z.string().describe("Reference value"),
+              name: z.string().max(100).describe("Reference name"),
+              value: z.string().max(500).describe("Reference value"),
             })
           )
           .min(1)
@@ -352,13 +243,11 @@ export function registerCardTools(
       },
     },
     async ({ card_id, references }) => {
-      logToolCall("revolut_update_card_references", { card_id });
+      logToolCall("revolut_update_card_references", { card_id, references });
       try {
-        const result = await client.putJson(
-          `/api/1.0/cards/${card_id}/references`,
-          references
+        return jsonResponse(
+          await client.putJson(`/api/1.0/cards/${card_id}/references`, references)
         );
-        return jsonResponse(result);
       } catch (error) {
         return errorResponse(error);
       }
