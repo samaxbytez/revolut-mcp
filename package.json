@@ -11,7 +11,7 @@
     "build"
   ],
   "engines": {
-    "node": ">=18"
+    "node": ">=24"
   },
   "keywords": [
     "revolut",
@@ -30,8 +30,9 @@
     "url": "https://github.com/samaxbytez/revolut-mcp/issues"
   },
   "scripts": {
-    "build": "tsc && chmod 755 build/index.js",
-    "dev": "tsc --watch",
+    "build": "node scripts/bundle.mjs",
+    "smoke": "node scripts/smoke.mjs",
+    "dev": "tsc --noEmit --watch",
     "start": "node build/index.js",
     "type-check": "tsc --noEmit",
     "test": "vitest run",
@@ -40,18 +41,17 @@
     "format": "prettier --write src",
     "prepublishOnly": "npm run build"
   },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.26.0",
-    "zod": "^3.25.0"
-  },
   "devDependencies": {
-    "@eslint/js": "^9.39.2",
-    "@types/node": "^22.16.0",
-    "eslint": "^9.39.2",
+    "@eslint/js": "^9.39.5",
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@types/node": "^24.19.2",
+    "esbuild": "0.28.2",
+    "eslint": "^9.39.5",
     "eslint-config-prettier": "^10.1.8",
-    "prettier": "^3.8.1",
+    "prettier": "^3.9.10",
     "typescript": "^5.8.3",
-    "typescript-eslint": "^8.55.0",
-    "vitest": "^4.0.18"
+    "typescript-eslint": "^8.71.2",
+    "vitest": "^4.0.18",
+    "zod": "^4.6.7"
   }
 }
