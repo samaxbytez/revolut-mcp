@@ -1,12 +1,19 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { RevolutClient } from "../client.js";
-import { jsonResponse, errorResponse, logToolCall } from "../utils.js";
+import {
+  jsonResponse,
+  errorResponse,
+  logToolCall,
+  definedOnly,
+  requestId,
+  uuid,
+  moneyAmount,
+  currencyCode,
+  isoDateTime,
+} from "../utils.js";
 
-export function registerTransferTools(
-  server: McpServer,
-  client: RevolutClient
-): void {
+export function registerTransferTools(server: McpServer, client: RevolutClient): void {
   server.registerTool(
     "revolut_create_payment",
     {
@@ -14,25 +21,22 @@ export function registerTransferTools(
       description:
         "Create a transfer to a counterparty's account or card. Requires a unique request_id for idempotency.",
       inputSchema: {
-        request_id: z
-          .string()
-          .describe("Unique idempotency key for the payment"),
-        account_id: z.string().describe("Source account ID (UUID)"),
-        counterparty_id: z
-          .string()
-          .describe("Receiver counterparty ID (UUID)"),
-        receiver_account_id: z
-          .string()
+        request_id: requestId.describe(
+          "Unique idempotency key for the payment (max 40 chars)"
+        ),
+        account_id: uuid.describe("Source account ID (UUID)"),
+        counterparty_id: uuid.describe("Receiver counterparty ID (UUID)"),
+        receiver_account_id: uuid
           .optional()
           .describe("Receiver's specific account ID within the counterparty"),
-        receiver_card_id: z
-          .string()
+        receiver_card_id: uuid
           .optional()
           .describe("Receiver's card ID (for card transfers)"),
-        amount: z.number().positive().describe("Payment amount"),
-        currency: z.string().describe("Currency code (e.g., GBP, EUR, USD)"),
+        amount: moneyAmount.describe("Payment amount"),
+        currency: currencyCode.describe("Currency code (e.g., GBP, EUR, USD)"),
         reference: z
           .string()
+          .max(500)
           .optional()
           .describe("Payment reference/description"),
         charge_bearer: z
@@ -41,44 +45,28 @@ export function registerTransferTools(
           .describe("Who bears the transfer charges"),
         transfer_reason_code: z
           .string()
+          .max(100)
           .optional()
           .describe("Transfer reason code (for cross-border payments)"),
-        schedule_for: z
-          .string()
+        schedule_for: isoDateTime
           .optional()
           .describe("Schedule date (ISO 8601 date, e.g., 2024-12-31)"),
       },
     },
     async (params) => {
-      logToolCall("revolut_create_payment", {
-        request_id: params.request_id,
-        amount: params.amount,
-        currency: params.currency,
-      });
+      logToolCall("revolut_create_payment", params);
       try {
-        const body: Record<string, unknown> = {
-          request_id: params.request_id,
-          account_id: params.account_id,
-          receiver: {
-            counterparty_id: params.counterparty_id,
-            ...(params.receiver_account_id && {
-              account_id: params.receiver_account_id,
-            }),
-            ...(params.receiver_card_id && {
-              card_id: params.receiver_card_id,
-            }),
-          },
-          amount: params.amount,
-          currency: params.currency,
-        };
-        if (params.reference) body.reference = params.reference;
-        if (params.charge_bearer) body.charge_bearer = params.charge_bearer;
-        if (params.transfer_reason_code)
-          body.transfer_reason_code = params.transfer_reason_code;
-        if (params.schedule_for) body.schedule_for = params.schedule_for;
-
-        const result = await client.postJson("/api/1.0/pay", body);
-        return jsonResponse(result);
+        const { counterparty_id, receiver_account_id, receiver_card_id, ...rest } =
+          params;
+        const body = definedOnly({
+          ...rest,
+          receiver: definedOnly({
+            counterparty_id,
+            account_id: receiver_account_id,
+            card_id: receiver_card_id,
+          }),
+        });
+        return jsonResponse(await client.postJson("/api/1.0/pay", body));
       } catch (error) {
         return errorResponse(error);
       }
@@ -92,37 +80,26 @@ export function registerTransferTools(
       description:
         "Move money between your own business accounts. Requires a unique request_id for idempotency.",
       inputSchema: {
-        request_id: z
-          .string()
-          .describe("Unique idempotency key for the transfer"),
-        source_account_id: z.string().describe("Source account ID (UUID)"),
-        target_account_id: z.string().describe("Target account ID (UUID)"),
-        amount: z.number().positive().describe("Transfer amount"),
-        currency: z.string().describe("Currency code"),
+        request_id: requestId.describe(
+          "Unique idempotency key for the transfer (max 40 chars)"
+        ),
+        source_account_id: uuid.describe("Source account ID (UUID)"),
+        target_account_id: uuid.describe("Target account ID (UUID)"),
+        amount: moneyAmount.describe("Transfer amount"),
+        currency: currencyCode.describe("Currency code"),
         reference: z
           .string()
+          .max(500)
           .optional()
           .describe("Transfer reference/description"),
       },
     },
     async (params) => {
-      logToolCall("revolut_create_transfer", {
-        request_id: params.request_id,
-        amount: params.amount,
-        currency: params.currency,
-      });
+      logToolCall("revolut_create_transfer", params);
       try {
-        const body: Record<string, unknown> = {
-          request_id: params.request_id,
-          source_account_id: params.source_account_id,
-          target_account_id: params.target_account_id,
-          amount: params.amount,
-          currency: params.currency,
-        };
-        if (params.reference) body.reference = params.reference;
-
-        const result = await client.postJson("/api/1.0/transfer", body);
-        return jsonResponse(result);
+        return jsonResponse(
+          await client.postJson("/api/1.0/transfer", definedOnly(params))
+        );
       } catch (error) {
         return errorResponse(error);
       }
@@ -139,8 +116,7 @@ export function registerTransferTools(
     async () => {
       logToolCall("revolut_get_transfer_reasons");
       try {
-        const result = await client.get("/api/1.0/transfer-reasons");
-        return jsonResponse(result);
+        return jsonResponse(await client.get("/api/1.0/transfer-reasons"));
       } catch (error) {
         return errorResponse(error);
       }

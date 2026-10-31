@@ -1,5 +1,4 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import type { RevolutClient } from "../client.js";
 import { registerAccountTools } from "./accounts.js";
 import { registerTransactionTools } from "./transactions.js";
 import { registerTransferTools } from "./transfers.js";
@@ -13,32 +12,7 @@ import { registerCardInvitationTools } from "./card-invitations.js";
 import { registerExpenseTools } from "./expenses.js";
 import { registerPaymentDraftTools } from "./payment-drafts.js";
 import { registerPayoutLinkTools } from "./payout-links.js";
-
-type ToolHandler = (...args: any[]) => any;
-
-function createMockServer() {
-  const tools = new Map<string, ToolHandler>();
-  return {
-    server: {
-      registerTool: vi.fn(
-        (name: string, _config: unknown, cb: ToolHandler) => {
-          tools.set(name, cb);
-        }
-      ),
-    } as any,
-    tools,
-  };
-}
-
-function createMockClient() {
-  return {
-    get: vi.fn().mockResolvedValue({ data: "mock" }),
-    postJson: vi.fn().mockResolvedValue({ data: "mock" }),
-    putJson: vi.fn().mockResolvedValue({ data: "mock" }),
-    patchJson: vi.fn().mockResolvedValue({ data: "mock" }),
-    deleteReq: vi.fn().mockResolvedValue({}),
-  } as unknown as RevolutClient;
-}
+import { allToolGroups, createMockClient, createMockServer } from "./test-helpers.js";
 
 let errorSpy: ReturnType<typeof vi.spyOn>;
 
@@ -251,9 +225,7 @@ describe("registerCounterpartyTools", () => {
     const handler = tools.get("revolut_delete_counterparty")!;
     const result = await handler({ counterparty_id: "cp-123" });
 
-    expect(client.deleteReq).toHaveBeenCalledWith(
-      "/api/1.0/counterparty/cp-123"
-    );
+    expect(client.deleteReq).toHaveBeenCalledWith("/api/1.0/counterparty/cp-123");
     expect(JSON.parse(result.content[0].text).success).toBe(true);
   });
 });
@@ -337,9 +309,7 @@ describe("registerCardTools", () => {
     const handler = tools.get("revolut_freeze_card")!;
     const result = await handler({ card_id: "card-1" });
 
-    expect(client.postJson).toHaveBeenCalledWith(
-      "/api/1.0/cards/card-1/freeze"
-    );
+    expect(client.postJson).toHaveBeenCalledWith("/api/1.0/cards/card-1/freeze");
     expect(JSON.parse(result.content[0].text).message).toBe("Card frozen");
   });
 });
@@ -377,5 +347,85 @@ describe("registerPayoutLinkTools", () => {
     const client = createMockClient();
     registerPayoutLinkTools(server, client);
     expect(server.registerTool).toHaveBeenCalledTimes(4);
+  });
+});
+
+describe("path parameters across all tools", () => {
+  // Every argument that ends up interpolated into a request path must reject
+  // traversal, including percent-encoded dot segments.
+  it("rejects traversal in every path-interpolated argument", async () => {
+    const { server, tools, schemas } = createMockServer();
+    const client = createMockClient();
+    for (const register of allToolGroups) register(server, client);
+
+    let pathParams = 0;
+    for (const [name, schema] of schemas) {
+      vi.clearAllMocks();
+      const args = Object.fromEntries(
+        Object.keys(schema).map((k) => [k, `MARK${k}MARK`])
+      );
+      await tools.get(name)!(args);
+
+      const paths = Object.values(client)
+        .flatMap((fn) => (fn as ReturnType<typeof vi.fn>).mock.calls)
+        // Query-string values are encoded by the client; only the path can be traversed.
+        .map((call) => String(call[0]));
+
+      for (const key of Object.keys(schema)) {
+        if (!paths.some((p) => p.includes(`MARK${key}MARK`))) continue;
+        pathParams++;
+        for (const attack of ["../x", "%2e%2e/x", "1?x=1", "1#x", "a/b"]) {
+          expect(
+            schema[key].safeParse(attack).success,
+            `${name}.${key} accepted ${attack}`
+          ).toBe(false);
+        }
+      }
+    }
+    expect(pathParams).toBeGreaterThanOrEqual(25);
+  });
+
+  it("registers 56 tools", () => {
+    const { server } = createMockServer();
+    for (const register of allToolGroups) register(server, createMockClient());
+    expect(server.registerTool).toHaveBeenCalledTimes(56);
+  });
+});
+
+describe("money tools validate their input", () => {
+  it("revolut_exchange_money needs exactly one side's amount", async () => {
+    const { server, tools } = createMockServer();
+    const client = createMockClient();
+    registerForexTools(server, client);
+    const base = {
+      request_id: "r1",
+      from_account_id: "a",
+      from_currency: "GBP",
+      to_account_id: "b",
+      to_currency: "EUR",
+    };
+    for (const amounts of [{}, { from_amount: 1, to_amount: 2 }]) {
+      const res = await tools.get("revolut_exchange_money")!({ ...base, ...amounts });
+      expect(res.isError).toBe(true);
+    }
+    expect(client.postJson).not.toHaveBeenCalled();
+  });
+
+  it("revolut_update_webhook needs at least one field", async () => {
+    const { server, tools } = createMockServer();
+    const client = createMockClient();
+    registerWebhookTools(server, client);
+    const res = await tools.get("revolut_update_webhook")!({ webhook_id: "x" });
+    expect(res.isError).toBe(true);
+    expect(client.patchJson).not.toHaveBeenCalled();
+  });
+
+  it("list tools flag a full page as possibly truncated", async () => {
+    const { server, tools } = createMockServer();
+    const client = createMockClient();
+    (client.get as any).mockResolvedValue([{ created_at: "2024-02-02" }]);
+    registerTransactionTools(server, client);
+    const res = await tools.get("revolut_list_transactions")!({ count: 1 });
+    expect(res.content[1].text).toContain("to=2024-02-02");
   });
 });

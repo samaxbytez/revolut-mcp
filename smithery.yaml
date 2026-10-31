@@ -7,17 +7,22 @@ startCommand:
     properties:
       revolutAccessToken:
         type: string
-        description: Your Revolut Business API access token
+        description: Your Revolut Business API access token (valid for 40 minutes)
       revolutBaseUrl:
         type: string
-        description: API base URL (defaults to sandbox)
+        description: API origin (defaults to the sandbox; https://b2b.revolut.com for production)
+      enableSensitiveTools:
+        type: boolean
+        default: false
+        description: Register payments, transfers, exchanges, payout links, new payees, card changes, team invitations and webhook changes
   commandFunction: |
     (config) => ({
       command: 'npx',
       args: ['-y', 'revolut-mcp'],
       env: {
         REVOLUT_ACCESS_TOKEN: config.revolutAccessToken,
-        ...(config.revolutBaseUrl ? { REVOLUT_BASE_URL: config.revolutBaseUrl } : {})
+        ...(config.revolutBaseUrl ? { REVOLUT_BASE_URL: config.revolutBaseUrl } : {}),
+        ...(config.enableSensitiveTools ? { REVOLUT_ENABLE_SENSITIVE_TOOLS: 'true' } : {})
       }
     })
   exampleConfig:
